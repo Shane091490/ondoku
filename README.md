@@ -124,3 +124,9 @@ scripts. Saved pictures are fetched through the same network guard as pages, kep
 JPEG, PNG, GIF, WebP or AVIF (never SVG), and served only to the article's owner with `nosniff` and a `default-src
 'none'; sandbox` CSP. Pictures not saved load from their sites with `referrerpolicy="no-referrer"`. API keys and
 sessions are stored hashed or random, and passwords use scrypt.
+
+## License
+
+Ondoku is released under the [MIT License](LICENSE). The speech engine it installs in the `tts` image,
+[Piper](https://github.com/OHF-Voice/piper1-gpl), is GPL-3.0, and each Piper voice has its own license (shown on the
+voice's model card on Hugging Face).
