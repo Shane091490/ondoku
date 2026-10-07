@@ -2,6 +2,7 @@
   "name": "readlog-server",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Readlog API: saved articles, extraction, read-aloud audio, users, API keys and OIDC in SQLite.",
   "main": "server.js",
