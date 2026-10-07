@@ -66,34 +66,6 @@ where saved values override the environment.
 - **iPhone**: A Shortcut can send shared links to `/api/v1/articles` with an API key (steps in Settings → Saving).
 - **Other apps**: Use the API described in [docs/API.md](docs/API.md).
 
-## How it works
-
-```
-server/            Express 5 + node:sqlite (Node 24)
-  server.js        routes, CSP, share target, static PWA
-  lib/fetcher.js   page fetching: SSRF guard checked at connect time, redirects, size cap, charset detection
-  lib/extract.js   Readability + metadata + DOMPurify + cleanup; numbers readable blocks (data-seg) for read aloud
-  lib/extractWorker.js, extractPool.js   extraction runs in a worker thread (jsdom is CPU-heavy)
-  lib/articles.js  storage, background fetch queue, search (SQLite FTS5), tags, archiving
-  lib/images.js    saved copies of article pictures (download queue, address rewriting, backfill)
-  lib/pronounce.js pronunciation fixes applied to the text sent to Piper
-  lib/tts.js       Piper client, audio job queue, segment timing manifest, MP3 encoding (ffmpeg), cache eviction
-  lib/auth.js, oidc.js, routes/   accounts, sessions, API keys, OIDC (authorization code + PKCE)
-web/               React 19 + Vite PWA (hash routing, no UI framework)
-  src/lib/naturalEngine.js  read-aloud player: segment clips while Piper is generating, then the single MP3
-  src/lib/pwa.js   install prompt, service worker registration and update notices
-  public/sw.js     service worker: offline app shell, articles, pictures
-tts/               Piper sidecar: downloads voices once, POST /synthesize returns WAV
-tests/             API end-to-end test with a fixture site (see tests/README.md)
-```
-
-Security notes: extracted HTML is sanitized on the server (no scripts, styles, iframes, forms or event handlers;
-links get `rel="noopener noreferrer nofollow"`), and pages are served with a CSP that allows no inline or remote
-scripts. Saved pictures are fetched through the same network guard as pages, kept only when their first bytes show
-JPEG, PNG, GIF, WebP or AVIF (never SVG), and served only to the article's owner with `nosniff` and a `default-src
-'none'; sandbox` CSP. Pictures not saved load from their sites with `referrerpolicy="no-referrer"`. API keys and
-sessions are stored hashed or random, and passwords use scrypt.
-
 ## License
 
 Ondoku is released under the [MIT License](LICENSE). The speech engine it installs in the `tts` image,
