@@ -1,6 +1,10 @@
 # Ondoku
 
 Ondoku (音読, "reading aloud") is a self-hosted read-later app. Save news articles by link, read them as clean text, or have them read aloud.
+<img width="1053" height="873" alt="image" src="https://github.com/user-attachments/assets/620a9945-0ce0-48aa-9081-0c867cd2fe72" />
+<img width="430" height="852" alt="image" src="https://github.com/user-attachments/assets/0c09a87f-041a-4680-bf2c-e4ccbbd19800" />
+
+
 
 - **Save by link**: Paste a link, share it from your phone, use the bookmarklet, or call the API.
 - **Clean articles**: Pages are fetched on the server and cut down to the readable text with Mozilla Readability.
