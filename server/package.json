@@ -1,0 +1,22 @@
+{
+  "name": "readlog-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Readlog API: saved articles, extraction, read-aloud audio, users, API keys and OIDC in SQLite.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "cookie-parser": "^1.4.7",
+    "dompurify": "^3.4.16",
+    "express": "^5.2.1",
+    "jsdom": "^30.1.2",
+    "undici": "^8.11.2"
+  }
+}

@@ -1,0 +1,30 @@
+# Ondoku: read-later app with read aloud. (The Compose project, containers and folder keep the working name "readlog".) App data in ./data, Piper voices in ./data/voices (no Docker volumes).
+name: readlog
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3102}:3102"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-America/Chicago}
+      TTS_URL: http://tts:5000
+    volumes:
+      - ./data:/data
+    depends_on:
+      - tts
+
+  # Local neural text-to-speech (Piper). Not published; only the app talks to it.
+  tts:
+    build: ./tts
+    restart: unless-stopped
+    environment:
+      # Voices downloaded on first start (empty = the US and British English voices in medium quality); more from Settings > Read aloud
+      PIPER_VOICES: ${PIPER_VOICES:-}
+      MAX_CONCURRENT: ${TTS_MAX_CONCURRENT:-2}
+      MAX_LOADED_VOICES: ${TTS_MAX_LOADED_VOICES:-4}
+    volumes:
+      - ./data/voices:/voices

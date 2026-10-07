@@ -1,0 +1,68 @@
+{
+  "name": "Ondoku",
+  "short_name": "Ondoku",
+  "id": "/",
+  "lang": "en",
+  "dir": "ltr",
+  "description": "Save articles to read later, and listen to them.",
+  "categories": [
+    "news",
+    "books",
+    "productivity"
+  ],
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#141416",
+  "theme_color": "#141416",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "share_target": {
+    "action": "/share",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "shortcuts": [
+    {
+      "name": "Queue",
+      "url": "/#/"
+    },
+    {
+      "name": "Starred",
+      "url": "/#/starred"
+    },
+    {
+      "name": "Archive",
+      "url": "/#/archive"
+    }
+  ]
+}
