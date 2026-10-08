@@ -1,18 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Play, Pause, SkipBack, SkipForward, X, LoaderCircle, Check, AudioLines, ChevronDown } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, X, LoaderCircle, Check, AudioLines, ChevronDown, ListEnd, Moon, ChevronsRight } from 'lucide-react';
 import { api } from '../api.js';
 import { Menu } from './ui.jsx';
 import { NaturalEngine } from '../lib/naturalEngine.js';
 import { voiceChoices, groupBy } from '../lib/voices.js';
 import { useApp } from '../App.jsx';
 import { clock } from '../lib/format.js';
+import { useSleep, setSleepMinutes, setSleepEndOfArticle, clearSleep, checkSleep, setSleepStopper } from '../lib/sleep.js';
 
 const RATES = [0.8, 1, 1.15, 1.3, 1.5, 1.75, 2];
 
 // Connects the natural-voice (Piper) engine to the rendered article: highlights and follows the block being read,
 // lets a tap on any paragraph jump there, and remembers where listening stopped. onFinished runs when playback
-// reaches the end after a real share of the article was listened to (not just its last paragraph).
-export function useReadAloud({ article, containerRef, user, setUser, appName, onFinished }) {
+// reaches the end after a real share of the article was listened to (not just its last paragraph); onEnded runs
+// whenever it reaches the end. onNextTrack handles the lock screen's "next" button (returns true when it did).
+export function useReadAloud({ article, containerRef, user, setUser, appName, onFinished, onEnded, onNextTrack }) {
   const prefs = user.prefs;
   const [open, setOpen] = useState(false);
   const [state, setState] = useState(null);
@@ -23,6 +25,10 @@ export function useReadAloud({ article, containerRef, user, setUser, appName, on
   const heard = useRef(new Set()); // paragraphs reached since the player was opened
   const finishedRef = useRef(onFinished);
   finishedRef.current = onFinished;
+  const endedRef = useRef(onEnded);
+  endedRef.current = onEnded;
+  const nextTrackRef = useRef(onNextTrack);
+  nextTrackRef.current = onNextTrack;
   const total = article.segments.length;
 
   const getElement = useCallback((seg) => containerRef.current?.querySelector(`[data-seg="${seg}"]`), [containerRef]);
@@ -57,8 +63,14 @@ export function useReadAloud({ article, containerRef, user, setUser, appName, on
   const createEngine = useCallback(() => {
     engineRef.current?.destroy();
     const engine = new NaturalEngine({
-      total, rate: prefs.rate, onState: setState, onSegment,
-      onEnd: () => { if (heard.current.size >= Math.max(1, Math.ceil((total - 1) * 0.3))) finishedRef.current?.(); },
+      total, rate: prefs.rate, onSegment,
+      // The sleep timer is checked against playback progress too (timers run late on a locked phone).
+      onState: (st) => { setState(st); if (st.status === 'playing') checkSleep(); },
+      onEnd: () => {
+        if (heard.current.size >= Math.max(1, Math.ceil((total - 1) * 0.3))) finishedRef.current?.();
+        endedRef.current?.();
+      },
+      onNextTrack: () => !!nextTrackRef.current?.(),
       articleId: article.id, voice: prefs.piperVoice,
       meta: { title: article.title, site: article.siteName || article.domain, image: article.leadImage, app: appName },
     });
@@ -133,12 +145,19 @@ export function useReadAloud({ article, containerRef, user, setUser, appName, on
   }, [open]);
 
   useEffect(() => { document.body.classList.toggle('has-player', open); return () => document.body.classList.remove('has-player'); }, [open]);
+  // While this player is open, the sleep timer pauses it.
+  useEffect(() => {
+    if (!open) return undefined;
+    setSleepStopper(() => engineRef.current?.pause());
+    return () => setSleepStopper(null);
+  }, [open]);
   useEffect(() => () => { engineRef.current?.destroy(); clearTimeout(saveTimer.current); }, []);
 
   return { open, state, start, close, setRate, setVoice, engine: engineRef };
 }
 
-export function Player({ ra, tts, article }) {
+// continuous: { on, upNext, toggle, skip } from the reader (continuous play through the queue).
+export function Player({ ra, tts, article, continuous }) {
   const s = ra.state || { status: 'loading', seg: 0, total: article.segments.length, rate: 1 };
   const eng = ra.engine.current;
   const playing = ['playing', 'buffering', 'loading'].includes(s.status) || (s.status === 'preparing' && eng?.wantPlay);
@@ -210,6 +229,7 @@ export function Player({ ra, tts, article }) {
         </div>
         {s.prep && s.prep.total > 0 && <div className="prep-bar" aria-hidden="true"><div style={{ width: `${Math.round((s.prep.done / s.prep.total) * 100)}%` }} /></div>}
         {s.status === 'preparing' && !eng?.wantPlay && <div className="player-note">Generating audio on your server. Press play to start listening as soon as the first paragraph is ready.</div>}
+        <PlayerExtras continuous={continuous} />
       </div>
     </div>
   );
@@ -219,4 +239,35 @@ export function Player({ ra, tts, article }) {
     if (fullAudio) eng?.seekTo(scrub); else eng?.jump(scrub);
     setScrub(null);
   }
+}
+
+// Continuous play (with what comes next) and the sleep timer.
+function PlayerExtras({ continuous }) {
+  const sleep = useSleep();
+  const sleepLabel = sleep.mode === 'minutes' ? `${sleep.left} min` : sleep.mode === 'end' ? 'End of article' : 'Sleep';
+  return (
+    <div className="player-extra">
+      {continuous && (
+        <button className={`chip ${continuous.on ? 'on' : ''}`} onClick={continuous.toggle} aria-pressed={continuous.on} title="When this article ends, play the next one in your queue">
+          <ListEnd size={14} />Play next
+        </button>
+      )}
+      <span className="up-next" aria-live="polite">
+        {continuous?.on && (continuous.upNext ? <>Up next: <b>{continuous.upNext.title}</b></> : 'Nothing after this in your queue')}
+      </span>
+      {continuous?.on && continuous.upNext && (
+        <button className="icon-btn small" onClick={continuous.skip} aria-label="Skip to the next article" title="Next article"><ChevronsRight size={17} /></button>
+      )}
+      <Menu up label="Sleep timer" trigger={({ toggle }) => (
+        <button className={`chip ${sleep.mode ? 'on' : ''}`} onClick={toggle} aria-label={`Sleep timer: ${sleep.mode ? sleepLabel : 'off'}`} title="Sleep timer"><Moon size={14} />{sleepLabel}</button>
+      )}>
+        <div className="menu-label">Stop playing</div>
+        {[15, 30, 45, 60].map((m) => (
+          <button key={m} onClick={() => setSleepMinutes(m)}>In {m === 60 ? '1 hour' : `${m} minutes`}</button>
+        ))}
+        <button onClick={setSleepEndOfArticle}>At the end of this article{sleep.mode === 'end' && <Check size={15} className="sel" />}</button>
+        {sleep.mode && <><hr /><button onClick={clearSleep}>Turn off the timer</button></>}
+      </Menu>
+    </div>
+  );
 }

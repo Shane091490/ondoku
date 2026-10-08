@@ -96,7 +96,8 @@ function decode(buf, contentType) {
 }
 
 // GET with redirects followed by hand, so every hop is checked by parseHttpUrl (and its address by guardedLookup).
-// Resolves with a successful response whose body has not been read yet.
+// Resolves with a successful response whose body has not been read yet (or notModified for a 304, when the request
+// was conditional).
 async function open(startUrl, headers) {
   let url = parseHttpUrl(startUrl);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -118,6 +119,10 @@ async function open(startUrl, headers) {
       if (!loc) throw new FetchError('The site sent a redirect without a destination');
       url = parseHttpUrl(new URL(loc, url).href);
       continue;
+    }
+    if (res.status === 304 && (headers['If-None-Match'] || headers['If-Modified-Since'])) {
+      await res.body?.cancel().catch(() => {});
+      return { res, url, notModified: true };
     }
     if (!res.ok) {
       await res.body?.cancel().catch(() => {});
@@ -143,6 +148,32 @@ async function fetchOnce(startUrl, userAgent) {
   }
   const buf = await readCapped(res);
   return { finalUrl: url.href, contentType, body: decode(buf, contentType), isText: /text\/plain/i.test(contentType) };
+}
+
+// Fetches a feed (or the page that links to one). etag / lastModified make the request conditional: an unchanged feed
+// answers 304 and comes back as { notModified: true }.
+const MAX_FEED_BYTES = 5 * 1048576;
+export async function fetchFeed(url, { etag, lastModified } = {}) {
+  const attempt = async (userAgent) => {
+    const headers = { 'User-Agent': userAgent, Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9, text/html;q=0.7, */*;q=0.3' };
+    if (etag) headers['If-None-Match'] = etag;
+    if (lastModified) headers['If-Modified-Since'] = lastModified;
+    return open(url, headers);
+  };
+  let opened;
+  try { opened = await attempt(BROWSER_UA); } catch (e) {
+    if (e.status !== 403 && e.status !== 429) throw e;
+    opened = await attempt(PLAIN_UA);
+  }
+  if (opened.notModified) return { notModified: true, finalUrl: opened.url.href };
+  const { res, url: final } = opened;
+  const contentType = res.headers.get('content-type') || '';
+  if (/^(image|audio|video)\/|application\/(pdf|zip|octet-stream)/i.test(contentType)) {
+    await res.body?.cancel().catch(() => {});
+    throw new FetchError(`This link is not a feed (${contentType.split(';')[0]})`);
+  }
+  const buf = await readCapped(res, MAX_FEED_BYTES, 'The feed is larger than 5 MB');
+  return { finalUrl: final.href, contentType, body: decode(buf, contentType), etag: res.headers.get('etag'), lastModified: res.headers.get('last-modified') };
 }
 
 // The picture formats kept for saved articles, recognised by their first bytes rather than the server's word. SVG is

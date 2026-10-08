@@ -7,9 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { authenticate, cleanupAuth } from './lib/auth.js';
 import { authRouter, oidcRouter } from './routes/auth.js';
 import { apiRouter } from './routes/api.js';
+import { publicRouter } from './routes/public.js';
 import { resumePendingFetches, archiveStale, purgeArchived } from './lib/articles.js';
 import { initTts } from './lib/tts.js';
 import { initImages } from './lib/images.js';
+import { startFeedScheduler } from './lib/feeds.js';
 import { APP_NAME, APP_VERSION } from './lib/config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +56,9 @@ app.use('/api/v1', apiRouter);
 app.use('/api', apiRouter);
 
 app.get('/healthz', (req, res) => res.json({ ok: true, app: APP_NAME, version: APP_VERSION }));
+
+// Public share links (no sign-in): /s/<token>
+app.use('/s', publicRouter);
 
 // PWA share target and bookmarklet entry point: hand the link to the in-app "save" screen.
 app.get('/share', (req, res) => {
@@ -106,6 +111,7 @@ app.listen(PORT, () => {
   initTts();
   initImages();
   resumePendingFetches();
+  startFeedScheduler();
   // "Archive articles left in the queue for N days" and "delete archived articles after N days" preferences: checked
   // shortly after start, then hourly.
   const tidy = () => {

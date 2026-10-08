@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Headphones, Star, Archive, ArchiveRestore, Ellipsis, ExternalLink, Copy, Share2, RotateCw, ClipboardPaste, Trash2,
-  Tag, Type, LoaderCircle, TriangleAlert, Minus, Plus, Pencil, Check,
+  Tag, Type, LoaderCircle, TriangleAlert, Minus, Plus, Pencil, Check, Globe, Link2Off,
 } from 'lucide-react';
 import { api } from '../api.js';
 import { goBack, navigate } from '../router.jsx';
@@ -12,6 +12,8 @@ import { TagEditor } from '../components/TagEditor.jsx';
 import { useReadAloud, Player } from '../components/Player.jsx';
 import { useDisplay, setDisplay, FONTS, WIDTHS, THEMES } from '../lib/prefs.js';
 import { longDate, minutes } from '../lib/format.js';
+import { nextInQueue, prepareAudio, markPlayed, startListeningSession } from '../lib/playlist.js';
+import { sleepAtEnd, sleepEndReached, sleepFiredRecently } from '../lib/sleep.js';
 
 let ttsCache = null;
 
@@ -44,10 +46,16 @@ export default function Reader({ id, query }) {
     );
   }
   if (!article) return <div className="auth"><LoaderCircle className="spin" size={28} color="var(--muted)" /></div>;
-  return <ReaderView key={article.contentHash || article.status} article={article} setArticle={setArticle} reload={() => load(false)} tts={tts} autoListen={query.get('listen') === '1'} />;
+  return (
+    <ReaderView
+      key={article.contentHash || article.status} article={article} setArticle={setArticle} reload={() => load(false)} tts={tts}
+      autoListen={query.get('listen') === '1'} continued={query.get('next') === '1'} queueStart={query.get('queue') === '1'}
+    />
+  );
 }
 
-function ReaderView({ article: a, setArticle, reload, tts, autoListen }) {
+// continued: opened by continuous play after the previous article ended; queueStart: "Play queue" in the list.
+function ReaderView({ article: a, setArticle, reload, tts, autoListen, continued, queueStart }) {
   const { user, setUser, status } = useApp();
   const toast = useToast();
   const display = useDisplay();
@@ -68,11 +76,48 @@ function ReaderView({ article: a, setArticle, reload, tts, autoListen }) {
     if (!out) return;
     toast(how === 'listen' ? 'Finished listening · archived' : 'Finished · archived', { action: { label: 'Undo', onClick: () => patch({ archived: false }) } });
   }
+  // Continuous play: the next article in the queue is worked out (and its audio prepared) once listening starts, and
+  // takes over when this one ends, unless the sleep timer says to stop at the end of the article.
+  const continuousOn = !!user.prefs.continuousPlay;
+  const [upNext, setUpNext] = useState(null);
+  const moving = useRef(false);
+  async function playNext({ atEnd = false } = {}) {
+    if (moving.current) return false;
+    let next = upNext;
+    if (!next) { try { next = await nextInQueue(a.id); } catch { next = null; } }
+    if (!next) { if (atEnd) toast('That was the last article in your queue'); return false; }
+    moving.current = true;
+    navigate(`/read/${next.id}?listen=1&next=1`, { replace: true });
+    return true;
+  }
   const ra = useReadAloud({
     article: a, containerRef, user, setUser, appName: status.appName,
     onFinished: () => { if (user.prefs.archiveOnListen) autoArchive('listen'); },
+    onEnded: () => {
+      if (sleepAtEnd()) { sleepEndReached(); toast('Sleep timer: stopped at the end of the article'); return; }
+      if (live.current.continuousOn) playNext({ atEnd: true });
+    },
+    onNextTrack: () => {
+      if (!live.current.continuousOn || !live.current.upNext) return false;
+      playNext();
+      return true;
+    },
   });
-  live.current = { archived: a.archived, prefs: user.prefs, listening: ra.open, ready, autoArchive };
+  useEffect(() => {
+    if (!ra.open || !continuousOn) { setUpNext(null); return undefined; }
+    let current = true;
+    markPlayed(a.id);
+    nextInQueue(a.id).then((n) => {
+      if (!current) return;
+      setUpNext(n);
+      if (n) prepareAudio(n.id, ra.state?.voice || user.prefs.piperVoice);
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [ra.open, continuousOn, a.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  async function toggleContinuous() {
+    try { const r = await api.patch('/api/me', { prefs: { continuousPlay: !continuousOn } }); setUser(r.user); } catch (e) { toast(e.message, { error: true }); }
+  }
+  live.current = { archived: a.archived, prefs: user.prefs, listening: ra.open, ready, autoArchive, continuousOn, upNext };
 
   // Reaching the end counts once the reader has scrolled through the article (it started above the end, and the
   // page is long enough to scroll) and spent a little time on it: a quarter of its reading time, 8 to 30 seconds.
@@ -128,7 +173,11 @@ function ReaderView({ article: a, setArticle, reload, tts, autoListen }) {
     return () => { window.removeEventListener('scroll', onScroll); clearTimeout(saveTimer); };
   }, [a.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { if (autoListen && ready) ra.start(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (queueStart) startListeningSession();
+    // Continuous play arriving just after the sleep timer went off: stay quiet.
+    if (autoListen && ready && !(continued && sleepFiredRecently())) ra.start();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function patch(body, msg) {
     try {
@@ -193,6 +242,7 @@ function ReaderView({ article: a, setArticle, reload, tts, autoListen }) {
             <button onClick={() => setModal('title')}><Pencil size={15} />Rename</button>
             {a.url && <a href={a.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={15} />Open original</a>}
             {a.url && <button onClick={share}>{navigator.share ? <Share2 size={15} /> : <Copy size={15} />}{navigator.share ? 'Share link' : 'Copy link'}</button>}
+            {a.status === 'ok' && <button onClick={() => setModal('public')}><Globe size={15} />{a.share ? 'Public link' : 'Share a public link'}</button>}
             {a.url && <button onClick={refetch}><RotateCw size={15} />Fetch again</button>}
             <button onClick={() => setModal('paste')}><ClipboardPaste size={15} />Paste the text</button>
             <hr />
@@ -213,6 +263,8 @@ function ReaderView({ article: a, setArticle, reload, tts, autoListen }) {
           {a.readingMinutes > 0 && <span>{minutes(a.readingMinutes)} read</span>}
           {a.wordCount > 0 && <span className="dot">{a.wordCount.toLocaleString()} words</span>}
           {a.source !== 'url' && <span className="dot">{a.source === 'text' ? 'Pasted text' : 'Supplied HTML'}</span>}
+          {a.feed && <span className="dot">From {a.feed.title}</span>}
+          {a.share && <span className="dot"><Globe size={12} style={{ verticalAlign: -1 }} /> Shared publicly</span>}
         </div>
         <div className="article-tags">
           {a.tags.map((t) => <a key={t} className="chip" href={`#/all?tag=${encodeURIComponent(t)}`}>#{t}</a>)}
@@ -250,10 +302,11 @@ function ReaderView({ article: a, setArticle, reload, tts, autoListen }) {
         )}
       </article>
 
-      {ra.open && <Player ra={ra} tts={tts} article={a} />}
+      {ra.open && <Player ra={ra} tts={tts} article={a} continuous={{ on: continuousOn, upNext, toggle: toggleContinuous, skip: () => playNext() }} />}
 
       {modal === 'paste' && <PasteTextModal article={a} onClose={() => setModal(null)} onSaved={(out) => { setModal(null); ra.close(); setArticle({ ...out, audio: [] }); }} />}
       {modal === 'tags' && <TagEditor article={a} onClose={() => setModal(null)} onSaved={(out) => { setArticle((cur) => ({ ...cur, ...out, audio: cur.audio })); setModal(null); }} />}
+      {modal === 'public' && <PublicLinkModal article={a} onClose={() => setModal(null)} onChange={(share) => setArticle((cur) => ({ ...cur, share }))} />}
       {modal === 'title' && <TitleModal article={a} onClose={() => setModal(null)} onSave={async (title) => { await patch({ title }); setModal(null); reload(); }} />}
       {modal === 'delete' && (
         <Confirm
@@ -324,6 +377,47 @@ function TitleModal({ article, onClose, onSave }) {
         <button className="btn ghost" onClick={onClose}>Cancel</button>
         <button className="btn primary" disabled={!title.trim()} onClick={() => onSave(title.trim())}>Save</button>
       </div>
+    </Modal>
+  );
+}
+
+// A public link anyone can open without signing in, until sharing stops.
+function PublicLinkModal({ article, onClose, onChange }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const share = article.share;
+  async function create() {
+    setBusy(true);
+    try { onChange(await api.post(`/api/articles/${article.id}/share`)); } catch (e) { toast(e.message, { error: true }); }
+    setBusy(false);
+  }
+  async function stop() {
+    setBusy(true);
+    try { await api.del(`/api/articles/${article.id}/share`); onChange(null); toast('Stopped sharing'); onClose(); } catch (e) { toast(e.message, { error: true }); }
+    setBusy(false);
+  }
+  async function send() {
+    if (navigator.share) { try { await navigator.share({ title: article.title, url: share.url }); } catch { /* cancelled */ } } else { await navigator.clipboard.writeText(share.url); toast('Link copied'); }
+  }
+  return (
+    <Modal title="Public link" sub={share ? 'Anyone with this link can read the article, with its pictures, without signing in.' : 'Create a link that anyone can open to read this article, with its pictures, without signing in. Nothing about your account is shown, and you can stop sharing at any time.'} onClose={onClose}>
+      {share ? (
+        <>
+          <input className="input" readOnly value={share.url} onFocus={(e) => e.target.select()} aria-label="Public link" />
+          <p className="muted" style={{ fontSize: 13, margin: '8px 0 0' }}>Opened {share.views} {share.views === 1 ? 'time' : 'times'}. Search engines are asked not to list it.</p>
+          <div className="modal-actions" style={{ flexWrap: 'wrap' }}>
+            <button className="btn danger ghost" disabled={busy} onClick={stop}><Link2Off size={15} />Stop sharing</button>
+            <span style={{ flex: 1 }} />
+            <a className="btn ghost" href={share.url} target="_blank" rel="noopener noreferrer">Open</a>
+            <button className="btn primary" onClick={send}>{navigator.share ? <Share2 size={15} /> : <Copy size={15} />}{navigator.share ? 'Share' : 'Copy'}</button>
+          </div>
+        </>
+      ) : (
+        <div className="modal-actions">
+          <button className="btn ghost" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={busy} onClick={create}><Globe size={15} />Create link</button>
+        </div>
+      )}
     </Modal>
   );
 }

@@ -88,8 +88,10 @@ export function serializeFull(a) {
   const tags = tagsFor([a.id]).get(a.id) || [];
   let segments = [];
   try { segments = JSON.parse(a.segments_json || '[]'); } catch { /* keep empty */ }
+  const feed = a.feed_id ? db.prepare('SELECT id, title, url FROM feeds WHERE id = ?').get(a.feed_id) : null;
   return {
     ...serializeSummary(a, tags),
+    feed: feed ? { id: feed.id, title: feed.title || feed.url } : null,
     contentHtml: a.content_html,
     segments: segments.map((s) => s.t),
     contentHash: a.content_hash,
@@ -236,8 +238,111 @@ export function listTags(userId) {
     .map((t) => ({ id: t.id, name: t.name, count: t.count }));
 }
 
+// ----- auto-tag rules -----
+// "site" rules match the article's domain and its subdomains; "title" and "text" rules match whole words, ignoring
+// case ("text" covers the title too). Rules only ever add tags.
+export const RULE_KINDS = ['site', 'title', 'text'];
+const MAX_RULES = 200;
+const bad = (message, status = 400) => Object.assign(new Error(message), { status });
+
+export function serializeRule(r) {
+  return { id: r.id, kind: r.kind, pattern: r.pattern, tag: r.tag, createdAt: r.created_at };
+}
+export function listRules(userId) {
+  return db.prepare("SELECT * FROM tag_rules WHERE user_id = ? ORDER BY CASE kind WHEN 'site' THEN 0 WHEN 'title' THEN 1 ELSE 2 END, pattern COLLATE NOCASE, tag").all(userId).map(serializeRule);
+}
+function cleanRule({ kind, pattern, tag }) {
+  if (!RULE_KINDS.includes(kind)) throw bad('A rule matches the site, the title or the text');
+  let p = String(pattern ?? '').replace(/\s+/g, ' ').trim();
+  if (kind === 'site') {
+    p = p.toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').split(/[/?#:]/)[0].replace(/^www\./, '').replace(/\.+$/, '');
+    if (!/^[\p{L}\p{N}-]+(\.[\p{L}\p{N}-]+)*$/u.test(p)) throw bad('Enter a site such as foxnews.com');
+  } else if (!/[\p{L}\p{N}]/u.test(p)) throw bad('Enter a word or phrase to look for');
+  if (p.length > 100) throw bad('Keep the pattern under 100 characters');
+  const t = normalizeTag(tag);
+  if (!t) throw bad('Enter the tag to add');
+  return { kind, pattern: p, tag: t };
+}
+function saveRule(fn) {
+  try { return fn(); } catch (e) {
+    if (/UNIQUE/i.test(e.message)) throw bad('That rule already exists', 409);
+    throw e;
+  }
+}
+export function addRule(userId, body) {
+  const r = cleanRule(body || {});
+  if (db.prepare('SELECT COUNT(*) AS n FROM tag_rules WHERE user_id = ?').get(userId).n >= MAX_RULES) throw bad(`You can keep up to ${MAX_RULES} rules`);
+  const info = saveRule(() => db.prepare('INSERT INTO tag_rules (user_id, kind, pattern, tag) VALUES (?, ?, ?, ?)').run(userId, r.kind, r.pattern, r.tag));
+  return serializeRule(db.prepare('SELECT * FROM tag_rules WHERE id = ?').get(info.lastInsertRowid));
+}
+export function updateRule(userId, id, body) {
+  const cur = db.prepare('SELECT * FROM tag_rules WHERE id = ? AND user_id = ?').get(Number(id), userId);
+  if (!cur) throw bad('Rule not found', 404);
+  const r = cleanRule({ kind: body?.kind ?? cur.kind, pattern: body?.pattern ?? cur.pattern, tag: body?.tag ?? cur.tag });
+  saveRule(() => db.prepare('UPDATE tag_rules SET kind = ?, pattern = ?, tag = ? WHERE id = ?').run(r.kind, r.pattern, r.tag, cur.id));
+  return serializeRule(db.prepare('SELECT * FROM tag_rules WHERE id = ?').get(cur.id));
+}
+export function deleteRule(userId, id) {
+  return db.prepare('DELETE FROM tag_rules WHERE id = ? AND user_id = ?').run(Number(id), userId).changes > 0;
+}
+
+const escapeRe = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const wordRe = (phrase) => new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRe(phrase).replace(/ /g, '\\s+')}(?![\\p{L}\\p{N}_])`, 'iu');
+export function rulesTagsFor(userId, a, rules = db.prepare('SELECT * FROM tag_rules WHERE user_id = ?').all(userId)) {
+  if (!rules.length) return [];
+  const host = domainOf(a.final_url || a.url || '').toLowerCase();
+  const title = a.title || '';
+  const text = `${title}\n${a.text_content || ''}`;
+  const out = new Set();
+  for (const r of rules) {
+    const hit = r.kind === 'site' ? host === r.pattern || host.endsWith(`.${r.pattern}`) : wordRe(r.pattern).test(r.kind === 'title' ? title : text);
+    if (hit) out.add(r.tag);
+  }
+  return [...out];
+}
+// Adds the tags an article's rules call for. Returns whether anything was added.
+export function applyTagRules(articleId, rules) {
+  const a = db.prepare('SELECT id, user_id, url, final_url, title, text_content FROM articles WHERE id = ?').get(articleId);
+  if (!a) return false;
+  const add = rulesTagsFor(a.user_id, a, rules);
+  if (!add.length) return false;
+  const cur = tagsFor([a.id]).get(a.id) || [];
+  const next = [...new Set([...cur, ...add])];
+  if (next.length === cur.length) return false;
+  setTags(a.user_id, a.id, next);
+  return true;
+}
+export function applyRulesToAll(userId) {
+  const rules = db.prepare('SELECT * FROM tag_rules WHERE user_id = ?').all(userId);
+  if (!rules.length) return 0;
+  let n = 0;
+  for (const r of db.prepare("SELECT id FROM articles WHERE user_id = ? AND fetch_status = 'ok'").all(userId)) if (applyTagRules(r.id, rules)) n++;
+  return n;
+}
+
+// ----- public share links -----
+// A shared article can be read by anyone with its /s/<token> link (see routes/public.js) until sharing stops.
+export function shareArticle(userId, id) {
+  const a = getArticle(userId, id);
+  if (!a) return null;
+  if (!a.share_token) db.prepare('UPDATE articles SET share_token = ?, share_created_at = ?, share_views = 0 WHERE id = ?').run(crypto.randomBytes(24).toString('base64url'), nowIso(), a.id);
+  return getArticle(userId, id);
+}
+export function unshareArticle(userId, id) {
+  return db.prepare('UPDATE articles SET share_token = NULL, share_created_at = NULL, share_views = 0 WHERE id = ? AND user_id = ? AND share_token IS NOT NULL').run(Number(id), userId).changes > 0;
+}
+// The article behind a share link, unless sharing stopped or its owner's account is disabled.
+export function sharedArticle(token) {
+  if (!/^[A-Za-z0-9_-]{32}$/.test(String(token))) return null;
+  return db.prepare('SELECT a.* FROM articles a JOIN users u ON u.id = a.user_id WHERE a.share_token = ? AND u.disabled = 0').get(token) || null;
+}
+export function listShares(userId) {
+  return db.prepare('SELECT id, title, url, final_url, share_token, share_created_at, share_views FROM articles WHERE user_id = ? AND share_token IS NOT NULL ORDER BY share_created_at DESC').all(userId);
+}
+
 // ----- creating and filling articles -----
 function applyExtraction(id, ex, extra = {}) {
+  const firstFill = !db.prepare('SELECT fetched_at FROM articles WHERE id = ?').get(id)?.fetched_at;
   db.prepare(`UPDATE articles SET title = ?, byline = ?, site_name = ?, excerpt = ?, lead_image = ?, published_at = ?, lang = ?, content_html = ?, text_content = ?,
     segments_json = ?, content_hash = ?, word_count = ?, reading_minutes = ?, fetch_status = 'ok', fetch_error = NULL, fetched_at = ?, updated_at = ?,
     final_url = COALESCE(?, final_url), source = COALESCE(?, source), lead_image_file = NULL, lead_in_content = NULL, images_at = NULL WHERE id = ?`).run(
@@ -248,6 +353,10 @@ function applyExtraction(id, ex, extra = {}) {
   // Audio made from older text no longer matches; drop it. The new body's pictures are saved in the background.
   hooks.dropStaleAudio?.(id, ex.contentHash);
   hooks.contentChanged?.(id);
+  // Auto-tag rules run once, when an article first gets its text (fetching again doesn't bring back removed tags).
+  if (firstFill) {
+    try { applyTagRules(id); } catch (e) { console.error('tag rules failed', id, e.message); }
+  }
 }
 
 // Renaming also changes what read aloud says first, so the spoken title (segment 0) follows.
@@ -268,11 +377,14 @@ export function findDuplicate(userId, url) {
 }
 
 // Creates an article. With text/html supplied it is filled immediately; otherwise the page is fetched in the background.
-export async function createArticle(userId, { url, title, text, html, tags } = {}) {
+// feedId: saved from a followed feed. keepExisting: a link already saved is left exactly as it is (a feed must not
+// bring an archived article back to the queue).
+export async function createArticle(userId, { url, title, text, html, tags, feedId = null, keepExisting = false } = {}) {
   let clean = null;
   if (url) clean = cleanUrl(parseHttpUrl(url).href);
   if (clean) {
     const dup = findDuplicate(userId, clean);
+    if (dup && keepExisting) return { article: dup, duplicate: true };
     if (dup) {
       // Saving again brings it back to the top of the queue.
       db.prepare('UPDATE articles SET archived = 0, archived_at = NULL, created_at = ?, updated_at = ? WHERE id = ?').run(nowIso(), nowIso(), dup.id);
@@ -283,8 +395,8 @@ export async function createArticle(userId, { url, title, text, html, tags } = {
   if (!clean && !text && !html) throw Object.assign(new Error('Provide a url, or text to save'), { status: 400 });
 
   const supplied = !!(text || html);
-  const info = db.prepare(`INSERT INTO articles (user_id, url, final_url, url_key, title, fetch_status, source) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-    userId, clean, clean, clean ? urlKey(clean) : null, String(title || '').trim().slice(0, 500), supplied ? 'ok' : 'pending', supplied ? (html ? 'html' : 'text') : 'url',
+  const info = db.prepare(`INSERT INTO articles (user_id, url, final_url, url_key, title, fetch_status, source, feed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    userId, clean, clean, clean ? urlKey(clean) : null, String(title || '').trim().slice(0, 500), supplied ? 'ok' : 'pending', supplied ? (html ? 'html' : 'text') : 'url', feedId,
   );
   const id = Number(info.lastInsertRowid);
   if (tags?.length) setTags(userId, id, tags);

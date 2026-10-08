@@ -40,6 +40,8 @@ export const DEFAULT_PREFS = {
   // Archiving: when an article is read to the end, when read aloud finishes it, after N days in the queue (0: never),
   // and whether archiving also removes its audio. Archived articles are deleted N days after archiving (0: never).
   archiveOnFinish: true, archiveOnListen: true, archiveAfterDays: 0, dropAudioOnArchive: false, deleteArchivedAfterDays: 730,
+  // Read aloud carries on with the next article in the queue when one finishes.
+  continuousPlay: false,
 };
 // Only known keys are returned, so settings that no longer exist (the old device-voice options) drop out.
 export function userPrefs(u) {

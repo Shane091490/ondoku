@@ -10,11 +10,15 @@ Ondoku (音読, "reading aloud") is a self-hosted read-later app. Save news arti
 - **Clean articles**: Pages are fetched on the server and cut down to the readable text with Mozilla Readability.
 - **Full copies**: Article pictures are saved too, so articles survive deleted pages and new paywalls.
 - **Read later**: Queue, Starred and Archive lists with tags and full-text search.
+- **Follow feeds**: New posts from the sites and RSS/Atom feeds you follow land in your queue.
+- **Auto-tag rules**: Articles get tags automatically by their site, title or text.
 - **Smart archiving**: Finished articles archive themselves, and archived ones are deleted after 2 years by default.
 - **Reader**: Four themes, three typefaces, and adjustable text size, spacing and width.
 - **Read aloud**: Natural voices generated locally by [Piper](https://github.com/OHF-Voice/piper1-gpl), with the current paragraph highlighted.
 - **Voice library**: Hear, install and remove any of Piper's 123 medium-quality voices in 52 languages.
+- **Continuous play**: Listen through your queue like a playlist, with a sleep timer.
 - **Pronunciation fixes**: Teach read aloud how to say names, acronyms and words like "GIF".
+- **Public share links**: Share an article, pictures included, with anyone through a link you can revoke.
 - **Fast on a plain CPU**: Ten minutes of audio take well under a minute to prepare.
 - **Installable app**: An offline-capable PWA that appears in Android's share menu when installed from Chrome.
 - **Phone friendly**: Swipe list rows to archive or star, with touch-sized controls throughout.
@@ -61,6 +65,7 @@ where saved values override the environment.
 | `MAX_IMAGE_MB`, `MAX_IMAGES_PER_ARTICLE`, `MAX_ARTICLE_IMAGES_MB` | `8`, `60`, `60` | Limits for saved pictures; past them a picture keeps its original address. |
 | `ALLOW_PRIVATE_URLS` | `false` | Links to LAN, localhost and `.local` addresses are blocked to protect your network. Set `true` to save from intranet sites. |
 | `FETCH_TIMEOUT_SECONDS`, `MAX_PAGE_MB`, `FETCH_CONCURRENCY` | `25`, `8`, `3` | Page fetching limits. |
+| `FEED_INTERVAL_MINUTES` | `60` | How often followed feeds are checked. |
 | `CORS_ORIGINS` | | Origins allowed to call the API from a browser with an API key. |
 
 ### Saving from other places

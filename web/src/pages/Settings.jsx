@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { LogOut, KeyRound, Plus, Trash2, Copy, Download, Bookmark, Play, LoaderCircle, Check, Users, Server, AudioLines, UserRound, Link2, Tag, Pencil, BookOpen } from 'lucide-react';
+import { LogOut, KeyRound, Plus, Trash2, Copy, Download, Bookmark, Play, LoaderCircle, Check, Users, Server, AudioLines, UserRound, Link2, Tag, Pencil, BookOpen, Rss } from 'lucide-react';
 import { api } from '../api.js';
 import { Link } from '../router.jsx';
 import { useApp } from '../App.jsx';
 import Header from '../components/Header.jsx';
 import VoiceSettings from '../components/VoiceSettings.jsx';
 import Pronunciations from '../components/Pronunciations.jsx';
+import TagRules from '../components/TagRules.jsx';
+import Feeds from '../components/Feeds.jsx';
 import { Modal, Confirm, Switch, useToast } from '../components/ui.jsx';
 import { normTag } from '../components/TagEditor.jsx';
 import { bytes, relDate, aboutDays } from '../lib/format.js';
@@ -16,6 +18,7 @@ const TABS = [
   ['reading', 'Reading', BookOpen],
   ['listen', 'Read aloud', AudioLines],
   ['saving', 'Saving', Link2],
+  ['feeds', 'Feeds', Rss],
   ['tags', 'Tags', Tag],
   ['api', 'API keys', KeyRound],
   ['admin', 'Admin', Server],
@@ -37,6 +40,7 @@ export default function Settings({ tab }) {
         {current === 'reading' && <Reading />}
         {current === 'listen' && <Listen />}
         {current === 'saving' && <Saving />}
+        {current === 'feeds' && <Feeds />}
         {current === 'tags' && <TagsSettings />}
         {current === 'api' && <ApiKeys />}
         {current === 'admin' && <Admin />}
@@ -122,6 +126,12 @@ function Listen() {
           hint="Generate the audio for every newly saved article in the background, so it's ready the moment you press play. Uses server CPU and about 0.5 MB per minute of audio."
           checked={!!prefs.autoAudio}
           onChange={(on) => save({ autoAudio: on })}
+        />
+        <SettingSwitch
+          label="Play the next article automatically"
+          hint="When an article ends, read aloud carries on with the next one in your queue, like a playlist. Also in the player, and Play queue on the Queue list starts it."
+          checked={!!prefs.continuousPlay}
+          onChange={(on) => save({ continuousPlay: on })}
         />
         {cache && <p className="muted" style={{ fontSize: 13, margin: 0 }}>Audio cache: {cache.tracks} tracks, {bytes(cache.bytes)}.</p>}
       </section>
@@ -286,7 +296,44 @@ function Saving() {
           <a className="btn ghost" href="/api/export?html=1" download>Include formatted HTML</a>
         </div>
       </section>
+      <SharedLinks />
     </>
+  );
+}
+
+// Articles shared with a public link, with how often each was opened.
+function SharedLinks() {
+  const toast = useToast();
+  const [shares, setShares] = useState(null);
+  const load = () => api.get('/api/shares').then(setShares).catch(() => setShares([]));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  async function stop(sh) {
+    try { await api.del(`/api/articles/${sh.articleId}/share`); toast('Stopped sharing'); load(); } catch (e) { toast(e.message, { error: true }); }
+  }
+  return (
+    <section className="section">
+      <h2>Shared links</h2>
+      <p className="sub">Articles anyone can read with their link, without signing in. Share one from its ⋯ menu with <i>Share a public link</i>.</p>
+      {!shares ? <p className="muted" style={{ margin: 0 }}><LoaderCircle size={14} className="spin" /> Loading…</p> : shares.length === 0 ? (
+        <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>Nothing is shared.</p>
+      ) : (
+        <div className="table-scroll">
+          <table className="table">
+            <tbody>
+              {shares.map((sh) => (
+                <tr key={sh.articleId}>
+                  <td><a href={`#/read/${sh.articleId}`}><b>{sh.title}</b></a><div className="muted" style={{ fontSize: 12.5 }}>Shared {relDate(sh.createdAt)} · opened {sh.views} {sh.views === 1 ? 'time' : 'times'}</div></td>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <button className="btn small ghost" onClick={() => navigator.clipboard.writeText(sh.url).then(() => toast('Link copied'))}><Copy size={13} />Copy</button>
+                    <button className="btn small ghost" onClick={() => stop(sh)}>Stop sharing</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -408,6 +455,7 @@ function TagsSettings() {
     try { setTags(await api.patch(`/api/tags/${t.id}`, { name: clean })); toast(merging ? `Merged #${t.name} into #${clean}` : `Renamed to #${clean}`); } catch (e) { toast(e.message, { error: true }); }
   }
   return (
+    <>
     <section className="section">
       <h2>Tags</h2>
       <p className="sub">Tag articles from their ⋯ menu, from the tag row under an article's title, or by adding #tags after a link when you save it. Search for #tag to find them. Renaming a tag to the name of another one merges the two.</p>
@@ -422,6 +470,8 @@ function TagsSettings() {
       )}
       {del && <Confirm title={`Delete #${del.name}?`} message={`The tag is removed from ${del.count} ${del.count === 1 ? 'article' : 'articles'}. The articles stay.`} onClose={() => setDel(null)} onConfirm={async () => { await api.del(`/api/tags/${del.id}`); toast(`Deleted #${del.name}`); load(); }} />}
     </section>
+    <TagRules onApplied={load} />
+    </>
   );
 }
 
