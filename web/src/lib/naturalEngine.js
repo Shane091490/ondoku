@@ -3,8 +3,22 @@
 // playing with the phone locked and supports seeking). The track manifest maps time to blocks for highlighting.
 import { api } from '../api.js';
 
+// One audio element for every article. Continuous play moves on to the next article on the same element, which a tap
+// has already unlocked and which phones keep playing with the screen locked.
+let sharedAudio = null;
+function audioElement() {
+  if (!sharedAudio) {
+    sharedAudio = new Audio();
+    sharedAudio.preload = 'auto';
+    sharedAudio.preservesPitch = true;
+  }
+  return sharedAudio;
+}
+
 export class NaturalEngine {
-  constructor({ articleId, total, voice, rate, meta, onState, onSegment, onEnd }) {
+  // onNextTrack: the lock screen's "next" button; returns true when it handled it (continuous play moved on to the
+  // next article), otherwise the button skips a paragraph.
+  constructor({ articleId, total, voice, rate, meta, onState, onSegment, onEnd, onNextTrack }) {
     this.kind = 'natural';
     this.articleId = articleId;
     this.total = total;
@@ -14,6 +28,7 @@ export class NaturalEngine {
     this.onState = onState;
     this.onSegment = onSegment;
     this.onEnd = onEnd;
+    this.onNextTrack = onNextTrack;
     this.track = null;
     this.mode = null; // 'full' | 'clips'
     this.n = 0; // manifest index of the current block
@@ -24,22 +39,26 @@ export class NaturalEngine {
     this.destroyed = false;
     this.gen = 0; // counts requests for a track; answers to an earlier one (another voice) are dropped
     this.retried = false; // asked again once already after the track disappeared
-    this.audio = new Audio();
-    this.audio.preload = 'auto';
-    this.audio.preservesPitch = true;
+    this.audio = audioElement();
+    this.listening = new AbortController(); // removes this engine's listeners from the shared element when it's done
     this.bind();
+  }
+
+  // Event listeners on the shared element that belong to this engine (removed by destroy()).
+  on(type, fn, opts = {}) {
+    this.audio.addEventListener(type, fn, { ...opts, signal: this.listening.signal });
   }
 
   bind() {
     const a = this.audio;
     // mode stays null while only the silent unlock clip has played; ignore its events.
-    a.addEventListener('timeupdate', () => { if (this.mode) this.onTime(); });
-    a.addEventListener('playing', () => { if (this.mode) this.emit({ status: 'playing' }); });
-    a.addEventListener('pause', () => { if (this.mode && !a.ended && this.status === 'playing') this.emit({ status: 'paused' }); });
-    a.addEventListener('waiting', () => { if (this.mode && this.wantPlay) this.emit({ status: 'buffering' }); });
-    a.addEventListener('ended', () => { if (this.mode) this.onClipEnded(); });
-    a.addEventListener('ratechange', () => { if (Math.abs(a.playbackRate - this.rate) > 0.01) a.playbackRate = this.rate; });
-    a.addEventListener('error', () => {
+    this.on('timeupdate', () => { if (this.mode) this.onTime(); });
+    this.on('playing', () => { if (this.mode) this.emit({ status: 'playing' }); });
+    this.on('pause', () => { if (this.mode && !a.ended && this.status === 'playing') this.emit({ status: 'paused' }); });
+    this.on('waiting', () => { if (this.mode && this.wantPlay) this.emit({ status: 'buffering' }); });
+    this.on('ended', () => { if (this.mode) this.onClipEnded(); });
+    this.on('ratechange', () => { if (Math.abs(a.playbackRate - this.rate) > 0.01) a.playbackRate = this.rate; });
+    this.on('error', () => {
       if (!a.src || this.destroyed || !this.mode) return;
       this.emit({ status: 'error', error: 'The audio could not be played' });
     });
@@ -157,7 +176,7 @@ export class NaturalEngine {
         this.audio.src = t.url;
       }
       const seek = () => { this.audio.currentTime = entry.start + 0.01; this.go(); };
-      if (this.audio.readyState >= 1) seek(); else this.audio.addEventListener('loadedmetadata', seek, { once: true });
+      if (this.audio.readyState >= 1) seek(); else this.on('loadedmetadata', seek, { once: true });
     } else {
       this.mode = 'clips';
       this.audio.src = `/api/articles/${this.articleId}/audio/${t.id}/seg/${entry.n}`;
@@ -273,7 +292,7 @@ export class NaturalEngine {
       const entry = this.track.segments[idx];
       if (this.mode !== 'full') { this.mode = 'full'; this.audio.src = this.track.url; }
       const seek = () => { this.audio.currentTime = entry.start + 0.01; this.emit(); };
-      if (this.audio.readyState >= 1) seek(); else this.audio.addEventListener('loadedmetadata', seek, { once: true });
+      if (this.audio.readyState >= 1) seek(); else this.on('loadedmetadata', seek, { once: true });
     } else this.emit();
   }
 
@@ -288,7 +307,7 @@ export class NaturalEngine {
     if (!this.track || this.track.status !== 'ready') return;
     if (this.mode !== 'full') { this.mode = 'full'; this.audio.src = this.track.url; }
     const doSeek = () => { this.audio.currentTime = Math.max(0, Math.min(seconds, this.track.duration - 0.1)); this.onTime(); };
-    if (this.audio.readyState >= 1) doSeek(); else this.audio.addEventListener('loadedmetadata', doSeek, { once: true });
+    if (this.audio.readyState >= 1) doSeek(); else this.on('loadedmetadata', doSeek, { once: true });
   }
   skip(delta) { if (this.mode === 'full') this.seekTo(this.audio.currentTime + delta); else if (delta > 0) this.next(); else this.prev(); }
 
@@ -323,7 +342,7 @@ export class NaturalEngine {
       ms.setActionHandler('play', () => this.play());
       ms.setActionHandler('pause', () => this.pause());
       ms.setActionHandler('previoustrack', () => this.prev());
-      ms.setActionHandler('nexttrack', () => this.next());
+      ms.setActionHandler('nexttrack', () => { if (!this.onNextTrack?.()) this.next(); });
       ms.setActionHandler('seekbackward', (d) => this.skip(-(d.seekOffset || 15)));
       ms.setActionHandler('seekforward', (d) => this.skip(d.seekOffset || 30));
       ms.setActionHandler('seekto', (d) => this.seekTo(d.seekTime));
@@ -332,6 +351,7 @@ export class NaturalEngine {
 
   destroy() {
     this.destroyed = true;
+    this.listening.abort();
     clearTimeout(this.pollTimer);
     this.audio.pause();
     this.audio.removeAttribute('src');

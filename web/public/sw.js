@@ -46,7 +46,13 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
 
   if (req.mode === 'navigate') {
-    e.respondWith(fetch(req).then((res) => { caches.open(SHELL).then((c) => c.put('/', res.clone())); return res; }).catch(() => caches.match('/')));
+    // Public share pages, sign-in redirects and the share target aren't the app: leave them to the network, so they
+    // never replace the cached app shell.
+    if (/^\/(s|auth|api)\//.test(url.pathname) || url.pathname === '/share') return;
+    e.respondWith(fetch(req).then((res) => {
+      if (res.ok && res.type === 'basic') { const copy = res.clone(); caches.open(SHELL).then((c) => c.put('/', copy)); }
+      return res;
+    }).catch(() => caches.match('/')));
     return;
   }
   if (url.origin === location.origin) {

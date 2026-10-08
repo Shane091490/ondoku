@@ -54,6 +54,8 @@ Errors are `{"error": "message"}` with a 4xx/5xx status. Timestamps are ISO 8601
 - `segments`: the text of each read-aloud segment. Index 0 is the title.
 - `contentHash`: changes whenever the text changes.
 - `leadInContent`: `true` when the body already shows the lead image.
+- `feed`: `{id, title}` of the followed feed it was saved from, or `null`.
+- `share`: `{url, createdAt, views}` when it has a public link, else `null`.
 
 Pictures are saved on the server shortly after an article is fetched (unless an admin turned this off). In
 `contentHtml` a saved picture's `src` is then `/api/articles/:id/images/<file>` (and its `srcset` is dropped); one that
@@ -75,8 +77,38 @@ couldn't be saved keeps its original address. These paths need the same authenti
 | PUT | `/articles/:id/content` | Replace the text: `{"title": "…", "text": "…"}` or `{"html": "…"}`. For paywalled or script-only pages. |
 | POST | `/articles/:id/refetch` | Fetch the page again (202). |
 | DELETE | `/articles/:id` | Delete, including generated audio and saved pictures (204). |
+| POST | `/articles/:id/share` | Create (or return) the article's public link: `{url, createdAt, views}`. Anyone with the link can read it at `/s/<token>` without signing in. |
+| DELETE | `/articles/:id/share` | Stop sharing; the link stops working (204). |
+| GET | `/shares` | Shared articles: `[{articleId, title, url, source, createdAt, views}]`. |
 | GET | `/articles/:id/images/:file` | A saved picture of the article (JPEG, PNG, GIF, WebP or AVIF). 404 for anything else. |
 | POST | `/articles/bulk` | `{"ids": [1,2], "action": "archive" / "unarchive" / "star" / "unstar" / "delete" / "tag", "tags": [...]}`. `tag` adds tags. |
+
+### Auto-tag rules
+
+Rules tag an article when it first gets its text (fetching it again doesn't re-add tags you removed). `site` matches the
+domain and its subdomains; `title` and `text` match whole words, ignoring case (`text` includes the title).
+
+| Method | Path | |
+|---|---|---|
+| GET | `/tag-rules` | `[{id, kind, pattern, tag, createdAt}]`. |
+| POST | `/tag-rules` | `{"kind": "site" / "title" / "text", "pattern": "foxnews.com", "tag": "news"}` (201; 409 if it exists; up to 200). A site may be given as an address. |
+| PATCH | `/tag-rules/:id` | Any of `kind`, `pattern`, `tag`. |
+| DELETE | `/tag-rules/:id` | 204. |
+| POST | `/tag-rules/apply` | Run the rules over all saved articles (they only add tags): `{updated}`. |
+
+### Followed feeds
+
+New entries of followed RSS/Atom feeds are saved to the queue, checked every `FEED_INTERVAL_MINUTES` (60). The first
+check saves the 3 newest entries; later checks save every new one (up to 20 per check). A link that's already saved is
+left alone (a feed never brings an archived article back).
+
+| Method | Path | |
+|---|---|---|
+| GET | `/feeds` | `[{id, url, title, siteUrl, tags, active, saved, lastCheckedAt, lastSuccessAt, lastError, createdAt}]`. |
+| POST | `/feeds` | `{"url": "https://example.com", "tags": ["news"]}`: a feed address, or a page that links to one (it's found). Runs the first check: `{feed, added}` (201; 409 if already followed). |
+| PATCH | `/feeds/:id` | Any of `title`, `tags`, `active` (false pauses it). |
+| DELETE | `/feeds/:id` | Unfollow; articles already saved stay (204). |
+| POST | `/feeds/:id/check` | Check now: `{feed, added}`. |
 
 ### Search syntax
 
@@ -109,7 +141,7 @@ speaker name (`en_GB-vctk-medium#p239`). Without a speaker, a multi-speaker mode
 |---|---|---|
 | GET | `/tts/status` | `{online, voices: [{id, name, language, languageName, region, quality, speakers, speakerNames, supported, unsupportedReason}], defaultVoice, cache: {tracks, bytes}}`. Lists installed voices; `supported: false` voices can't speak in this version (`unsupportedReason` says why). |
 | GET | `/tts/preview?voice=<key>` | A short WAV sample of exactly that installed voice (synthesized on the server). 404 if it isn't installed, 400 if it can't speak in this version. |
-| POST | `/articles/:id/audio` | Start (or find) the track: `{"voice": "<key>"}` (optional; defaults to the user's choice, then the server default). Returns a track. These requests go ahead of automatic background jobs, and asking for a different voice cancels the article's job in the old voice. |
+| POST | `/articles/:id/audio` | Start (or find) the track: `{"voice": "<key>"}` (optional; defaults to the user's choice, then the server default). Returns a track. These requests go ahead of automatic background jobs, and asking for a different voice cancels the article's job in the old voice. With `"background": true` the track is queued behind everything else instead (continuous play prepares the next article this way). |
 | GET | `/articles/:id/audio?voice=<key>` | The track for that voice (or `null`). Without `voice`: all tracks for the current text. |
 | GET | `/articles/:id/audio/:trackId.mp3` | The finished MP3 (supports Range requests). |
 | GET | `/articles/:id/audio/:trackId/seg/:n` | WAV of one finished segment while the track is still generating. |
@@ -157,14 +189,14 @@ Track:
 | Method | Path | |
 |---|---|---|
 | POST | `/import` | `{"text": "anything containing links", "tags": []}`: saves every http(s) link (up to 1000). Returns `{found, created, duplicates, invalid}`. |
-| GET | `/export` | All articles with plain text, plus the pronunciation fixes, as a JSON download. `?html=1` adds `contentHtml`. Exports use the sites' own picture addresses. |
+| GET | `/export` | All articles with plain text, plus the pronunciation fixes, tag rules and followed feeds, as a JSON download. `?html=1` adds `contentHtml`. Exports use the sites' own picture addresses. |
 
 ## Account (session only, except `GET /me`)
 
 | Method | Path | |
 |---|---|---|
 | GET | `/me` | `{user, apiKey}`. With an API key, `apiKey` shows its name and permission. |
-| PATCH | `/me` | `{"displayName": "…", "prefs": {"piperVoice": "<voice key>", "rate": 1.2, "autoAudio": true, "speakers": ["en_GB-vctk-medium#p239"], "archiveOnFinish": true, "archiveOnListen": true, "archiveAfterDays": 0, "dropAudioOnArchive": false, "deleteArchivedAfterDays": 730}}`. `speakers` are the speakers picked from multi-speaker models; they appear in the player's voice list. `archiveOnFinish` / `archiveOnListen` are followed by the web app (it archives when you scroll to the end of an article, or read aloud finishes it). `archiveAfterDays` (0 = never) archives articles saved longer ago than that and not opened since (starred ones stay), hourly; changing it applies at once and the answer adds `archived`: how many moved. `deleteArchivedAfterDays` (default 730, 0 = never, up to 36500) deletes archived articles that many days after they were archived, with their audio and saved pictures (starred ones are kept), hourly; a new value applies at once and the answer adds `deleted`. Check `GET /archive/expired?days=N` first: it can't be undone. 400 "Unknown voice" for a malformed `piperVoice`, 400 "You can keep up to 100 speakers". |
+| PATCH | `/me` | `{"displayName": "…", "prefs": {"piperVoice": "<voice key>", "rate": 1.2, "autoAudio": true, "speakers": ["en_GB-vctk-medium#p239"], "archiveOnFinish": true, "archiveOnListen": true, "archiveAfterDays": 0, "dropAudioOnArchive": false, "deleteArchivedAfterDays": 730, "continuousPlay": false}}`. `continuousPlay`: read aloud moves on to the next article in the queue when one ends. `speakers` are the speakers picked from multi-speaker models; they appear in the player's voice list. `archiveOnFinish` / `archiveOnListen` are followed by the web app (it archives when you scroll to the end of an article, or read aloud finishes it). `archiveAfterDays` (0 = never) archives articles saved longer ago than that and not opened since (starred ones stay), hourly; changing it applies at once and the answer adds `archived`: how many moved. `deleteArchivedAfterDays` (default 730, 0 = never, up to 36500) deletes archived articles that many days after they were archived, with their audio and saved pictures (starred ones are kept), hourly; a new value applies at once and the answer adds `deleted`. Check `GET /archive/expired?days=N` first: it can't be undone. 400 "Unknown voice" for a malformed `piperVoice`, 400 "You can keep up to 100 speakers". |
 | GET | `/archive/expired?days=N` | `{days, count}`: how many archived articles a `deleteArchivedAfterDays` of N would delete now (default: the account's current value). |
 | POST | `/me/password` | `{"currentPassword", "newPassword"}` |
 | POST | `/me/sessions/logout-others` | |
@@ -173,6 +205,7 @@ Track:
 ## Other entry points
 
 - `GET /share?url=&title=&text=`: PWA share target and bookmarklet. Redirects to the in-app save screen.
+- `GET /s/<token>`: a shared article's public page (no sign-in; 404 once sharing stops).
 - `GET /healthz`: `{ok, app, version}`.
 
 ## Examples

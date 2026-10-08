@@ -6,12 +6,14 @@ import {
   requireUser, requireAdmin, apiKeyGuard, publicUser, userPrefs, DEFAULT_PREFS, hashPassword, verifyPassword,
   createApiKey, listApiKeys, revokeApiKey, deleteUserSessions, createSession, setSessionCookie, normalizeEmail, EMAIL_RE, getUserByEmail,
 } from '../lib/auth.js';
-import { cfg, settingsSnapshot, SETTING_KEYS, SECRET_KEYS, APP_NAME, APP_VERSION } from '../lib/config.js';
+import { cfg, settingsSnapshot, SETTING_KEYS, SECRET_KEYS, APP_NAME, APP_VERSION, publicUrl } from '../lib/config.js';
 import { setSetting } from '../lib/db.js';
 import {
   listArticles, counts, getArticle, serializeFull, serializeSummary, createArticle, replaceContent, enqueueFetch, setTags, listTags, renameArticle,
   renameTag, deleteTag, archiveArticles, archiveStale, deleteArticles, expiredArchived, purgeArchived,
+  listRules, addRule, updateRule, deleteRule, applyRulesToAll, shareArticle, unshareArticle, listShares,
 } from '../lib/articles.js';
+import { listFeeds, addFeed, updateFeed, deleteFeed, checkFeedNow } from '../lib/feeds.js';
 import { imageFile, deleteArticleImages, originalImageHtml, imageUsage, backfillImages } from '../lib/images.js';
 import {
   listPronunciations, savePronunciation, updatePronunciation, deletePronunciation, applyPronunciations, MAX_SAY,
@@ -77,7 +79,7 @@ apiRouter.get('/articles/:id', (req, res) => {
   const a = getArticle(req.user.id, asInt(req.params.id));
   if (!a) return res.status(404).json({ error: 'Article not found' });
   if (req.authMethod === 'session' && req.query.open === '1') db.prepare('UPDATE articles SET opened_at = ? WHERE id = ?').run(nowIso(), a.id);
-  res.json({ ...serializeFull(a), audio: currentTracks(a).map(serializeTrack) });
+  res.json({ ...serializeFull(a), share: shareInfo(req, a), audio: currentTracks(a).map(serializeTrack) });
 });
 
 apiRouter.patch('/articles/:id', (req, res) => {
@@ -128,6 +130,25 @@ apiRouter.delete('/articles/:id', (req, res) => {
   res.status(204).end();
 });
 
+// ----- public share links -----
+function shareInfo(req, a) {
+  return a.share_token ? { url: `${publicUrl(req)}/s/${a.share_token}`, createdAt: a.share_created_at, views: a.share_views } : null;
+}
+apiRouter.post('/articles/:id/share', (req, res) => {
+  const a = shareArticle(req.user.id, asInt(req.params.id));
+  if (!a) return res.status(404).json({ error: 'Article not found' });
+  if (a.fetch_status !== 'ok') return res.status(409).json({ error: 'The article text is not ready yet' });
+  res.json(shareInfo(req, a));
+});
+apiRouter.delete('/articles/:id/share', (req, res) => {
+  if (!getArticle(req.user.id, asInt(req.params.id))) return res.status(404).json({ error: 'Article not found' });
+  unshareArticle(req.user.id, asInt(req.params.id));
+  res.status(204).end();
+});
+apiRouter.get('/shares', (req, res) => {
+  res.json(listShares(req.user.id).map((a) => ({ articleId: a.id, title: a.title, url: `${publicUrl(req)}/s/${a.share_token}`, source: a.final_url || a.url, createdAt: a.share_created_at, views: a.share_views })));
+});
+
 // Bulk actions on several articles: archive, unarchive, star, unstar, delete, tag (adds tags).
 apiRouter.post('/articles/bulk', (req, res) => {
   const { ids, action, tags } = req.body || {};
@@ -173,6 +194,38 @@ apiRouter.patch('/tags/:id', (req, res) => {
 apiRouter.delete('/tags/:id', (req, res) => {
   if (!deleteTag(req.user.id, asInt(req.params.id))) return res.status(404).json({ error: 'Tag not found' });
   res.status(204).end();
+});
+
+// ----- auto-tag rules -----
+apiRouter.get('/tag-rules', (req, res) => res.json(listRules(req.user.id)));
+apiRouter.post('/tag-rules', (req, res) => {
+  try { res.status(201).json(addRule(req.user.id, req.body)); } catch (e) { fail(res, e); }
+});
+apiRouter.patch('/tag-rules/:id', (req, res) => {
+  try { res.json(updateRule(req.user.id, asInt(req.params.id), req.body)); } catch (e) { fail(res, e); }
+});
+apiRouter.delete('/tag-rules/:id', (req, res) => {
+  if (!deleteRule(req.user.id, asInt(req.params.id))) return res.status(404).json({ error: 'Rule not found' });
+  res.status(204).end();
+});
+// Run the rules over everything already saved (they only add tags).
+apiRouter.post('/tag-rules/apply', (req, res) => res.json({ updated: applyRulesToAll(req.user.id) }));
+
+// ----- followed feeds -----
+apiRouter.get('/feeds', (req, res) => res.json(listFeeds(req.user.id)));
+apiRouter.post('/feeds', async (req, res) => {
+  try { res.status(201).json(await addFeed(req.user.id, req.body || {})); } catch (e) { fail(res, e); }
+});
+apiRouter.patch('/feeds/:id', (req, res) => {
+  const b = req.body || {};
+  try { res.json(updateFeed(req.user.id, asInt(req.params.id), { title: b.title, tags: b.tags, active: b.active === undefined ? undefined : bool(b.active) })); } catch (e) { fail(res, e); }
+});
+apiRouter.delete('/feeds/:id', (req, res) => {
+  if (!deleteFeed(req.user.id, asInt(req.params.id))) return res.status(404).json({ error: 'Feed not found' });
+  res.status(204).end();
+});
+apiRouter.post('/feeds/:id/check', async (req, res) => {
+  try { res.json(await checkFeedNow(req.user.id, asInt(req.params.id))); } catch (e) { fail(res, e); }
 });
 
 // ----- read aloud (natural voice) -----
@@ -248,7 +301,8 @@ apiRouter.post('/articles/:id/audio', async (req, res) => {
     const cur = getArticle(req.user.id, a.id);
     if (!cur) return res.status(404).json({ error: 'Article not found' });
     // Someone is waiting to listen: this goes ahead of automatic jobs and stops this article's audio in other voices.
-    res.json(serializeTrack(requestTrack(cur, voice, { interactive: true })));
+    // background: getting the next article ready during continuous play, queued behind everything else.
+    res.json(serializeTrack(requestTrack(cur, voice, { interactive: !bool(req.body?.background) })));
   } catch (e) { fail(res, e); }
 });
 
@@ -340,8 +394,10 @@ apiRouter.get('/export', (req, res) => {
     return { ...rest, leadImage: a.lead_image, text: a.text_content, ...(req.query.html === '1' ? { contentHtml: originalImageHtml(a.id, contentHtml) } : {}) };
   });
   const pronunciations = listPronunciations(req.user.id).map(({ word, say, matchCase }) => ({ word, say, matchCase }));
+  const tagRules = listRules(req.user.id).map(({ kind, pattern, tag }) => ({ kind, pattern, tag }));
+  const feeds = listFeeds(req.user.id).map(({ url, title, tags, active }) => ({ url, title, tags, active }));
   res.set('Content-Disposition', `attachment; filename="${APP_NAME.toLowerCase()}-export-${new Date().toISOString().slice(0, 10)}.json"`);
-  res.json({ app: APP_NAME, version: APP_VERSION, exportedAt: nowIso(), count: items.length, articles: items, pronunciations });
+  res.json({ app: APP_NAME, version: APP_VERSION, exportedAt: nowIso(), count: items.length, articles: items, pronunciations, tagRules, feeds });
 });
 
 // ----- me -----
@@ -375,7 +431,7 @@ apiRouter.patch('/me', (req, res) => {
     if (p.rate !== undefined && Number.isFinite(Number(p.rate))) next.rate = Math.min(Math.max(Number(p.rate), 0.5), 3);
     if (p.autoAudio !== undefined) next.autoAudio = bool(p.autoAudio);
     if (speakers) next.speakers = speakers;
-    for (const k of ['archiveOnFinish', 'archiveOnListen', 'dropAudioOnArchive']) if (p[k] !== undefined) next[k] = bool(p[k]);
+    for (const k of ['archiveOnFinish', 'archiveOnListen', 'dropAudioOnArchive', 'continuousPlay']) if (p[k] !== undefined) next[k] = bool(p[k]);
     if (days != null) next.archiveAfterDays = Number(days);
     if (keepDays != null) next.deleteArchivedAfterDays = Number(keepDays);
     for (const k of Object.keys(next)) if (!(k in DEFAULT_PREFS)) delete next[k];

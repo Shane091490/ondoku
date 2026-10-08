@@ -152,6 +152,44 @@ CREATE TABLE IF NOT EXISTS article_images (
   PRIMARY KEY (article_id, url)
 );
 
+-- Auto-tag rules: articles whose site, title or text matches get the tag when first saved.
+CREATE TABLE IF NOT EXISTS tag_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(user_id, kind, pattern, tag)
+);
+
+-- Followed RSS/Atom feeds, and the entries already seen in each (so nothing is saved twice).
+CREATE TABLE IF NOT EXISTS feeds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  site_url TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',
+  active INTEGER NOT NULL DEFAULT 1,
+  etag TEXT,
+  last_modified TEXT,
+  last_checked_at TEXT,
+  last_success_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(user_id, url)
+);
+CREATE TABLE IF NOT EXISTS feed_items (
+  feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+  guid TEXT NOT NULL,
+  link TEXT,
+  published_at TEXT,
+  article_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (feed_id, guid)
+);
+
 -- Read-aloud pronunciation fixes, per account.
 CREATE TABLE IF NOT EXISTS pronunciations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,6 +233,10 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('articles_fts') WHERE name = 't
 // an audio track was made with ('' for none).
 ensureColumns('articles', { images_at: 'TEXT', lead_image_file: 'TEXT', lead_in_content: 'INTEGER' });
 ensureColumns('audio_tracks', { say_hash: "TEXT NOT NULL DEFAULT ''" });
+// Public share links and feeds (2026-10-08). share_token: the secret in /s/<token> (NULL: not shared); feed_id: the
+// followed feed an article was saved from.
+ensureColumns('articles', { share_token: 'TEXT', share_created_at: 'TEXT', share_views: 'INTEGER NOT NULL DEFAULT 0', feed_id: 'INTEGER' });
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS articles_share_token ON articles(share_token) WHERE share_token IS NOT NULL');
 
 export function nowIso() {
   return new Date().toISOString();

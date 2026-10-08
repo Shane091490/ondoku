@@ -30,7 +30,7 @@ const EMPTY = {
 
 export default function List({ view, query }) {
   const toast = useToast();
-  const { user, status } = useApp();
+  const { user, status, setUser } = useApp();
   const keepDays = user.prefs.deleteArchivedAfterDays;
   const tag = query.get('tag') || '';
   const [q, setQ] = useState('');
@@ -106,6 +106,16 @@ export default function List({ view, query }) {
   }
 
   function changeSort(s) { setSort(s); remember(`sort.${view}`, s); limitRef.current = PAGE; }
+
+  // Listen through the queue: continuous play on, starting with the first article that has its text.
+  async function playQueue() {
+    const first = data.items.find((a) => a.status === 'ok' && a.wordCount > 0);
+    if (!first) { toast('Nothing in the queue is ready to play yet'); return; }
+    if (!user.prefs.continuousPlay) {
+      try { const r = await api.patch('/api/me', { prefs: { continuousPlay: true } }); setUser(r.user); } catch { /* still plays the first one */ }
+    }
+    navigate(`/read/${first.id}?listen=1&queue=1`);
+  }
   function setTag(t) { navigate(`${view === 'queue' ? '/' : `/${view}`}${t ? `?tag=${encodeURIComponent(t)}` : ''}`); }
 
   const empty = EMPTY[view];
@@ -139,6 +149,9 @@ export default function List({ view, query }) {
               <div className="menu-label">Sort</div>
               {SORTS.map(([k, label]) => <button key={k} onClick={() => changeSort(k)}>{label}{sort === k && <Check size={15} className="sel" />}</button>)}
             </Menu>
+          )}
+          {view === 'queue' && data.items.length > 0 && (
+            <button className="chip" onClick={playQueue} aria-label="Play queue" title="Listen to your queue, one article after another"><Headphones size={13} /><span className="hide-sm">Play queue</span></button>
           )}
           <Menu label="View" className="display-panel" trigger={({ toggle }) => <button className="chip" onClick={toggle} title="Layout and text size" aria-label="Layout and text size"><LayoutList size={13} /><span className="hide-sm">View</span></button>}>
             <ViewPanel display={display} />
